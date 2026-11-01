@@ -6,7 +6,6 @@ The script measures every label of the diagram (participants, messages, notes,
 node labels) and generates a mermaid configuration whose box widths, margins
 and padding are large enough for the text, so nothing overflows or is clipped.
 
-It is shared tooling: any of the four Vue workspaces can hand it a diagram.
 Paths are relative to the repository root, and the PNG is written beside the
 source unless a destination is given:
 
