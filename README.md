@@ -70,6 +70,7 @@ python mermaid_to_png.py diagram.md --size-cm "20x?" --compress 9 --optimize
 | `--max-text-width` | Long messages/notes wrapped above this width in px (default 280; 0 = no wrapping) |
 | `--compress` | PNG zlib compression level 0-9 (default 6) |
 | `--optimize` | Run Pillow's extra filter/strategy analysis (smaller PNG, slower) |
+| `--font-path` | TTF/OTF font used for text measurement (overrides `MERMAID_TO_PNG_FONT` and built-in search) |
 
 ## License
 

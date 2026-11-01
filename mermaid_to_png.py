@@ -53,6 +53,45 @@ FONT_CANDIDATES = [
     "C:/Windows/Fonts/arial.ttf",
 ]
 
+FONT_SEARCH_ROOTS = [
+    "/usr/share/fonts",
+    "/usr/local/share/fonts",
+    "/Library/Fonts",
+    "/System/Library/Fonts",
+    os.path.join(os.environ.get("WINDIR", r"C:\\Windows"), "Fonts"),
+    os.path.expanduser("~/.fonts"),
+    os.path.expanduser("~/.local/share/fonts"),
+]
+
+FONT_FILENAMES = {Path(path).name for path in FONT_CANDIDATES}
+
+
+def _resolve_font_path(font_path=None):
+    candidates = []
+    if font_path:
+        candidates.append(font_path)
+    env_font = os.environ.get("MERMAID_TO_PNG_FONT")
+    if env_font:
+        candidates.append(env_font)
+    candidates.extend(FONT_CANDIDATES)
+
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate):
+            return candidate
+
+    for root in FONT_SEARCH_ROOTS:
+        root_path = Path(root)
+        if not root_path.is_dir():
+            continue
+        try:
+            for name in FONT_FILENAMES:
+                for match in root_path.rglob(name):
+                    if match.is_file():
+                        return str(match)
+        except OSError:
+            continue
+    return None
+
 
 # --------------------------------------------------------------------------- #
 # text measurement
@@ -65,18 +104,17 @@ class TextMeter:
     is missing, so the script still runs (just with less-tight sizing).
     """
 
-    def __init__(self, size=FONT_SIZE):
+    def __init__(self, size=FONT_SIZE, font_path=None):
         self.size = size
         self.font = None
         try:
             from PIL import ImageFont
-
-            for path in FONT_CANDIDATES:
-                if os.path.exists(path):
-                    self.font = ImageFont.truetype(path, size)
-                    break
         except ImportError:
-            pass
+            return
+
+        resolved = _resolve_font_path(font_path)
+        if resolved:
+            self.font = ImageFont.truetype(resolved, size)
 
     def width(self, text):
         """Width in px of the widest line of `text` (lines split on <br/>)."""
@@ -104,10 +142,38 @@ def extract_diagrams(path):
     A `.mmd`/`.mermaid` file is treated as a single diagram verbatim. Exits
     with an error if no diagram can be found.
     """
-    text = Path(path).read_text(encoding="utf-8")
-    blocks = re.findall(r"```\s*mermaid[^\n]*\n(.*?)```", text, re.DOTALL | re.IGNORECASE)
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        sys.exit(f"error: {path} is not valid UTF-8")
+    lines = text.splitlines()
+    blocks = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        opening = re.match(r"^([ \t]{0,3})(`{3,}|~{3,})(.*)$", lines[i])
+        if opening:
+            info = opening.group(3).strip().split()
+            if info and info[0].lower() == "mermaid":
+                marker = opening.group(2)
+                close = re.compile(
+                    r"^([ \t]{0,3})"
+                    + re.escape(marker[0])
+                    + "{"
+                    + str(len(marker))
+                    + r",}[ \t]*$"
+                )
+                body = []
+                j = i + 1
+                while j < n and not close.match(lines[j]):
+                    body.append(lines[j])
+                    j += 1
+                blocks.append("\n".join(body).strip("\n"))
+                i = j + 1 if j < n else n
+                continue
+        i += 1
     if blocks:
-        return [b.strip("\n") for b in blocks]
+        return blocks
     if path.lower().endswith((".mmd", ".mermaid")):
         return [text]
     sys.exit(f"error: no ```mermaid block found in {path}")
@@ -196,13 +262,14 @@ def wrap_class_diagram(code, meter, max_w):
             continue
         if in_class:
             brace_depth += line.count("{") - line.count("}")
-            # wrap lines that look like attributes/methods (contain : or ())
             stripped = line.strip()
-            if stripped and not stripped.startswith("}") and (":" in stripped or "(" in stripped):
-                # wrap the whole content after indentation
+            if (
+                stripped
+                and not stripped.startswith(("}", "//", "%%", "#"))
+                and (":" in stripped or "(" in stripped)
+            ):
                 indent = re.match(r"^(\s*)", line).group(1)
                 wrapped = indent + wrap_text(stripped, meter, max_w).replace("\n", "<br/>")
-                # if wrap_text added breaks, handle
                 lines.append(wrapped)
                 if brace_depth <= 0 and "}" in line:
                     in_class = False
@@ -238,7 +305,7 @@ def wrap_mindmap(code, meter, max_w):
 
 def wrap_journey(code, meter, max_w):
     """Wrap journey task titles."""
-    task = re.compile(r"^(\s*.+?:\s*)(.+)$")
+    task = re.compile(r"^(\s*)(.+?)(\s*:\s*\d.*)$")
     lines = []
     for line in code.splitlines():
         stripped = line.strip()
@@ -251,8 +318,9 @@ def wrap_journey(code, meter, max_w):
             lines.append(line)
             continue
         m = task.match(line)
-        if m and len(m.group(2)) > 10:  # only wrap longer texts
-            lines.append(m.group(1) + wrap_text(m.group(2), meter, max_w))
+        if m and len(m.group(2)) > 10:  # only wrap longer task titles
+            indent, title, tail = m.groups()
+            lines.append(indent + wrap_text(title, meter, max_w) + tail)
         else:
             lines.append(line)
     return "\n".join(lines)
@@ -503,7 +571,7 @@ def mindmap_config(code, meter):
 def journey_config(code, meter):
     """Config for journey."""
     widest = 0
-    for m in re.finditer(r":\s*(.+)$", code, re.MULTILINE):
+    for m in re.finditer(r"^\s*(.+?)\s*:\s*\d+(?:\s*:.*)?$", code, re.MULTILINE):
         widest = max(widest, meter.width(m.group(1)))
     return {
         "useMaxWidth": False,
@@ -637,6 +705,8 @@ def render(code, out_png, cfg, size, tmp, compress=6, optimize=False):
     probe = Path(tmp) / "probe.png"
     run(2, probe)  # scale 1 renders ~2% taller than 2x/2, so probe at 2
     nw, nh = (v / 2 for v in png_size(probe))
+    if nw <= 0 or nh <= 0:
+        sys.exit("error: mermaid-cli produced an invalid probe image")
     max_w, max_h = size
     if max_w is None:  # height only: xHEIGHT
         s = max_h / nh
@@ -668,7 +738,7 @@ def parse_size(text):
     Raises argparse.ArgumentTypeError on an unrecognized form.
     """
     m = re.fullmatch(
-        r"(\d+(?:\.\d+)?)\s*[xX*,]\s*(\d+(?:\.\d+)?)"
+        r"(\d+(?:\.\d+)?)\s*[xX]\s*(\d+(?:\.\d+)?)"
         r"|(\d+(?:\.\d+)?)\s*[xX]\s*\?"
         r"|\?\s*[xX]\s*(\d+(?:\.\d+)?)"
         r"|(\d+(?:\.\d+)?)",
@@ -739,6 +809,11 @@ def main():
         help="run Pillow's extra filter/strategy analysis on the resample step "
         "(smaller PNG, slower)",
     )
+    ap.add_argument(
+        "--font-path",
+        metavar="PATH",
+        help="TTF/OTF font used for text measurement (overrides MERMAID_TO_PNG_FONT and built-in search)",
+    )
     args = ap.parse_args()
 
     if args.size and args.size_cm:
@@ -765,11 +840,15 @@ def main():
     src = Path(args.source)
     if not src.is_file():
         sys.exit(f"error: {src} not found")
+    if args.font_path and not Path(args.font_path).is_file():
+        sys.exit(f"error: font not found: {args.font_path}")
     dest = Path(args.dest) if args.dest else src.with_suffix(".png")
     dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists():
+        print(f"warning: overwriting existing file {dest}", file=sys.stderr)
 
     diagrams = extract_diagrams(str(src))
-    meter = TextMeter(args.font_size)
+    meter = TextMeter(args.font_size, args.font_path)
     if not meter.font:
         print(
             "note: Pillow/font not found, using estimated text widths "

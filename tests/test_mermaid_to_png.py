@@ -381,3 +381,48 @@ class TestIntegrationRender:
         assert out.exists()
         w, h = m2p.png_size(str(out))
         assert w > 0 and h > 0
+
+
+# ------------------------------------------------------------------------------
+# Review-fix regressions
+# ------------------------------------------------------------------------------
+
+
+class TestReviewFixes:
+    def test_tilde_fence(self, tmp_path):
+        p = tmp_path / "a.md"
+        p.write_text("~~~mermaid\nX\n~~~\n")
+        assert m2p.extract_diagrams(str(p)) == ["X"]
+
+    def test_indented_fence(self, tmp_path):
+        p = tmp_path / "a.md"
+        p.write_text("  ```mermaid\nX\n  ```\n")
+        assert m2p.extract_diagrams(str(p)) == ["X"]
+
+    def test_invalid_utf8_exits(self, tmp_path):
+        p = tmp_path / "a.md"
+        p.write_bytes(b"\xff\xfe\x00")
+        with pytest.raises(SystemExit):
+            m2p.extract_diagrams(str(p))
+
+    def test_parse_size_rejects_comma(self):
+        with pytest.raises(m2p.argparse.ArgumentTypeError):
+            m2p.parse_size("100,200")
+
+    def test_journey_config_measures_task_title(self, meter):
+        code = "journey\n    A very long task title: 5: Me"
+        cfg = m2p.journey_config(code, meter)
+        expected = max(180, round(meter.width("A very long task title") + 25))
+        assert cfg["wrappingWidth"] == expected
+
+    def test_wrap_journey_wraps_title(self, meter):
+        code = "journey\n    A very long title: 5: Me"
+        out = m2p.wrap_journey(code, meter, 40)
+        assert "5: Me" in out
+        assert "<br/>" in out
+
+    def test_font_path_missing_falls_back(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(m2p, "FONT_CANDIDATES", [])
+        monkeypatch.setattr(m2p, "FONT_SEARCH_ROOTS", [])
+        meter = m2p.TextMeter(16, str(tmp_path / "missing.ttf"))
+        assert meter.font is None
